@@ -10,7 +10,7 @@
   import {
     PLAN_FORMATS, projectToZip, projectFromZip, testdataToZip, downloadBlob, emptyProject,
   } from './lib/project.js';
-  import { loadProject, replaceAll, writeChanges, fileRecord, metaRecord, requestPersist } from './lib/projectStore.js';
+  import { loadProject, replaceAll, writeChanges, fileRecord, metaRecord, requestPersist, saveDirty } from './lib/projectStore.js';
   import { Runner, langOf, LANG_LABELS } from './lib/runner.js';
   import { IS_MOBILE } from './lib/env.js';
   import { generate, testExtras, fileOfRole } from './lib/pipeline.js';
@@ -76,6 +76,17 @@
   let checker = $derived(project ? fileOfRole(project, 'checker') : null);
   let hasExtras = $derived(files.some((f) => f.role === 'extra'));
   let stale = $derived(genVersion !== null && genVersion !== projectVersion);
+
+  // 「有修改尚未下載備份」也存到 IndexedDB，重新整理後仍會提醒
+  let savedDirty = null;
+  $effect(() => {
+    const d = dirty;
+    untrack(() => {
+      if (!project || !storageOk || d === savedDirty) return;
+      savedDirty = d;
+      saveDirty(d).catch(() => {});
+    });
+  });
 
   // ---------- 自動儲存（spec §10.1）----------
   // saved：最後一次成功寫入的內容，用來找出哪些檔案需要寫入
@@ -162,12 +173,15 @@
         if (res) {
           markSaved(res.project);
           setProject(res.project);
+          dirty = res.dirty;
+          savedDirty = res.dirty;
         } else {
           const p = exampleById('aplusb-py').build();
           setProject(p);
           showExamples = true;
           await replaceAll(p);
           markSaved(p);
+          savedDirty = false;
         }
       } catch (e) {
         // 無法使用 IndexedDB（例如瀏覽器限制）：仍可使用，但不會自動儲存
@@ -203,6 +217,7 @@
     try {
       await replaceAll(p);
       markSaved(p);
+      savedDirty = false;
       saveError = null;
     } catch (e) {
       saveError = `無法自動儲存專案（${e?.message ?? e}）。請下載專案 zip 備份，以免遺失修改。`;

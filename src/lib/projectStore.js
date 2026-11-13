@@ -5,6 +5,8 @@ const DB_NAME = 'webtaskmaker-project';
 const FILES = 'files';
 const META = 'meta';
 const META_KEY = 'project';
+// 「有修改尚未下載備份」的狀態，重新整理後也要記得
+const BACKUP_KEY = 'backup';
 
 let dbPromise = null;
 
@@ -64,39 +66,50 @@ export function metaRecord(p) {
 
 /**
  * 讀取專案；沒有時嘗試搬移 localStorage 中的舊版專案（搬移成功後刪除舊資料）。
- * 回傳 { project, migrated } 或 null
+ * 回傳 { project, migrated, dirty } 或 null；dirty 表示有修改尚未下載備份
  */
 export async function loadProject() {
   const db = await openDb();
   const tx = db.transaction([FILES, META], 'readonly');
-  const [meta, files] = await Promise.all([
+  const [meta, files, backup] = await Promise.all([
     request(tx.objectStore(META).get(META_KEY)),
     request(tx.objectStore(FILES).getAll()),
+    request(tx.objectStore(META).get(BACKUP_KEY)),
   ]);
   if (meta) {
     const byId = new Map(files.map((f) => [f.id, f]));
     const ordered = (meta.order ?? []).map((id) => byId.get(id)).filter(Boolean);
     // 不在順序表中的檔案（例如寫入到一半）接在後面，避免遺失
     for (const f of files) if (!meta.order?.includes(f.id)) ordered.push(f);
-    return { project: normalizeProject({ ...meta, files: ordered }), migrated: false };
+    return { project: normalizeProject({ ...meta, files: ordered }), migrated: false, dirty: !!backup?.dirty };
   }
   const legacy = loadLegacyProject();
   if (legacy) {
-    await replaceAll(legacy);
+    // 舊版沒有記錄是否已備份，保守起見視為尚未備份
+    await replaceAll(legacy, { dirty: true });
     clearLegacyProject();
-    return { project: legacy, migrated: true };
+    return { project: legacy, migrated: true, dirty: true };
   }
   return null;
 }
 
-/** 整個專案重新寫入（載入範例、上傳專案、新專案時使用） */
-export async function replaceAll(project) {
+/** 整個專案重新寫入（載入範例、上傳專案、新專案時使用）；新的專案視為不需要備份 */
+export async function replaceAll(project, { dirty = false } = {}) {
   const db = await openDb();
   const tx = db.transaction([FILES, META], 'readwrite');
   const files = tx.objectStore(FILES);
   files.clear();
   for (const f of project.files) files.put(fileRecord(f));
   tx.objectStore(META).put(metaRecord(project));
+  tx.objectStore(META).put({ key: BACKUP_KEY, dirty });
+  await done(tx);
+}
+
+/** 記錄是否有修改尚未下載備份 */
+export async function saveDirty(dirty) {
+  const db = await openDb();
+  const tx = db.transaction(META, 'readwrite');
+  tx.objectStore(META).put({ key: BACKUP_KEY, dirty });
   await done(tx);
 }
 
