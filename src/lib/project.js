@@ -61,7 +61,8 @@ export function normalizeProject(p) {
   return proj;
 }
 
-export function loadFromStorage() {
+/** 讀取舊版存在 localStorage 的專案（只用於搬移到 IndexedDB，spec §10.1） */
+export function loadLegacyProject() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
@@ -71,16 +72,11 @@ export function loadFromStorage() {
   }
 }
 
-/** 回傳 null 表示成功，否則回傳錯誤訊息 */
-export function saveToStorage(project) {
+export function clearLegacyProject() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(project));
-    return null;
-  } catch (e) {
-    if (e && (e.name === 'QuotaExceededError' || e.code === 22)) {
-      return '專案太大，超出瀏覽器 localStorage 容量，無法自動儲存。請下載專案 zip 備份。';
-    }
-    return `無法自動儲存：${e?.message ?? e}`;
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* 略過 */
   }
 }
 

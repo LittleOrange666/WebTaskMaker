@@ -4,6 +4,7 @@
   import { langOf, LANG_LABELS } from '../lib/runner.js';
   import { QUICKRUN_STORAGE_KEY } from '../lib/config.js';
   import { ROLES, formatSize, byteLength, downloadBlob } from '../lib/project.js';
+  import { toast } from '../lib/dialog.svelte.js';
 
   let { runner, project, genState, envMessage, busy, onBusy } = $props();
 
@@ -45,7 +46,6 @@ print(a + b);
   let running = $state(false);
   let editorKey = $state(1);
   let tab = $state('stdout');
-  let copied = $state(false);
 
   // 自動儲存（與專案分開，spec §15.3）
   let saveTimer;
@@ -89,6 +89,27 @@ print(a + b);
     const file = e.target.files[0];
     e.target.value = '';
     if (file) qs.stdin = await file.text();
+  }
+
+  function downloadInput() {
+    downloadBlob(new Blob([qs.stdin], { type: 'text/plain' }), 'input.txt');
+  }
+
+  // 程式碼的上傳與下載（spec §15.1）
+  let codeFile;
+  async function uploadCode(e) {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    // 依副檔名切換語言，無法判斷時沿用目前的語言
+    const l = langOf(file.name) ?? qs.lang;
+    qs.codes[l] = await file.text();
+    qs.lang = l;
+    editorKey++;
+  }
+
+  function downloadCode() {
+    downloadBlob(new Blob([qs.codes[qs.lang]], { type: 'text/plain' }), FILENAMES[qs.lang]);
   }
 
   function splitArgs(s) {
@@ -140,10 +161,9 @@ print(a + b);
   async function copyOut() {
     try {
       await navigator.clipboard.writeText(result.stdout);
-      copied = true;
-      setTimeout(() => (copied = false), 1500);
+      toast('已複製輸出');
     } catch {
-      alert('無法複製到剪貼簿');
+      toast('無法複製到剪貼簿，請改用下載');
     }
   }
 
@@ -176,6 +196,9 @@ print(a + b);
         {/each}
       </div>
       <span class="spacer"></span>
+      <button class="small" onclick={() => codeFile.click()} title="上傳程式檔取代目前的程式碼">⤒ 上傳</button>
+      <button class="small" onclick={downloadCode} title="下載目前的程式碼">⤓ 下載</button>
+      <input type="file" class="hidden" accept=".cpp,.cc,.cxx,.py,.js,.txt" bind:this={codeFile} onchange={uploadCode} />
       {#if programFiles.length}
         <select onchange={loadProgram} aria-label="從專案載入程式">
           <option value="">從專案載入程式…</option>
@@ -212,7 +235,8 @@ print(a + b);
             {#each inputSources as src}<option value={src.id}>{src.label}</option>{/each}
           </select>
         {/if}
-        <button class="small" onclick={() => inputFile.click()}>⤒ 上傳檔案</button>
+        <button class="small" onclick={() => inputFile.click()}>⤒ 上傳</button>
+        <button class="small" onclick={downloadInput}>⤓ 下載</button>
         <input type="file" class="hidden" bind:this={inputFile} onchange={uploadInput} />
       </div>
       <textarea bind:value={qs.stdin} spellcheck="false" rows="8" aria-label="輸入"></textarea>
@@ -244,7 +268,7 @@ print(a + b);
         {#if tab === 'stdout'}
           {#if result.stdout}
             <div class="out-actions">
-              <button class="small" onclick={copyOut}>{copied ? '已複製' : '複製'}</button>
+              <button class="small" onclick={copyOut}>複製</button>
               <button class="small" onclick={downloadOut}>⤓ 下載</button>
             </div>
           {/if}

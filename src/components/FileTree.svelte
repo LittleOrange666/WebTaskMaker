@@ -1,6 +1,7 @@
 <script>
-  import { ROLES, EXPECTED, PLAN_FORMATS, makeFile } from '../lib/project.js';
+  import { ROLES, EXPECTED, PLAN_FORMATS, makeFile, downloadBlob } from '../lib/project.js';
   import { langOf } from '../lib/runner.js';
+  import { alertDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte.js';
 
   let { project, selectedId = $bindable(), mode } = $props();
 
@@ -23,8 +24,8 @@
     extra: '用 checker 判定是否符合預期',
   };
 
-  let uploadRole = $state(null);
   let uploadInput;
+  let uploadTarget = null; // { role } 上傳新檔案；{ file } 取代某個檔案的內容
 
   function optional(role) {
     if (role === 'solution') return mode === 'direct';
@@ -43,59 +44,113 @@
     return null;
   }
 
-  function addFile(role) {
-    const name = prompt(`新增${ROLES[role].label}，請輸入檔名：`, DEFAULT_NAMES[role]);
+  async function addFile(role) {
+    const name = await promptDialog({
+      title: `新增${ROLES[role].label}`,
+      label: '檔名',
+      value: DEFAULT_NAMES[role],
+      confirmLabel: '新增',
+      validate: (v) => validateName(role, v),
+    });
     if (name == null) return;
-    const err = validateName(role, name.trim());
-    if (err) { alert(err); return; }
-    const file = makeFile(role, name.trim(), '', role === 'extra' ? { expected: 'AC' } : {});
+    const file = makeFile(role, name, '', role === 'extra' ? { expected: 'AC' } : {});
     project.files.push(file);
     selectedId = file.id;
   }
 
-  function renameFile(file) {
-    const name = prompt('新的檔名：', file.name);
-    if (name == null || name.trim() === file.name) return;
-    const err = validateName(file.role, name.trim(), file.id);
-    if (err) { alert(err); return; }
-    file.name = name.trim();
+  async function renameFile(file) {
+    const name = await promptDialog({
+      title: '重新命名',
+      label: '新的檔名',
+      value: file.name,
+      confirmLabel: '重新命名',
+      validate: (v) => validateName(file.role, v, file.id),
+    });
+    if (name == null || name === file.name) return;
+    file.name = name;
   }
 
-  function deleteFile(file) {
-    if (!confirm(`確定要刪除 ${file.name}？`)) return;
+  async function deleteFile(file) {
+    const ok = await confirmDialog({
+      title: `刪除 ${file.name}？`,
+      message: '刪除後無法復原。若需要保留，請先下載這個檔案或下載專案 zip。',
+      confirmLabel: '刪除',
+      danger: true,
+    });
+    if (!ok) return;
     const idx = project.files.findIndex((f) => f.id === file.id);
-    project.files.splice(idx, 1);
+    if (idx >= 0) project.files.splice(idx, 1);
     if (selectedId === file.id) selectedId = project.files[0]?.id;
   }
 
-  function startUpload(role) {
-    uploadRole = role;
+  function downloadFile(file) {
+    downloadBlob(new Blob([file.content], { type: 'text/plain' }), file.name);
+  }
+
+  function pick(target, multiple) {
+    uploadTarget = target;
     uploadInput.value = '';
-    uploadInput.multiple = !ROLES[role].single;
+    uploadInput.multiple = multiple;
     uploadInput.click();
   }
 
   async function onUpload(e) {
-    const role = uploadRole;
-    const files = [...e.target.files];
-    for (const file of files) {
-      const content = await file.text();
-      const existing = project.files.find((f) => f.role === role && (ROLES[role].single || f.name === file.name));
-      if (existing && role !== 'plan') {
-        if (!confirm(`要以上傳的 ${file.name} 取代 ${existing.name}？`)) continue;
+    const target = uploadTarget;
+    const picked = [...e.target.files];
+    e.target.value = '';
+    if (!target || !picked.length) return;
+    if (target.file) await replaceContent(target.file, picked[0]);
+    else await uploadNew(target.role, picked);
+  }
+
+  /** 以上傳的檔案取代某個檔案的內容（spec §4.1） */
+  async function replaceContent(file, picked) {
+    const content = await picked.text();
+    // 程式的語言不同時（例如把 .cpp 上傳到 gen.py），改用上傳的檔名，否則執行時會用錯語言
+    if (needsLang(file.role) && langOf(picked.name) !== langOf(file.name)) {
+      const err = validateName(file.role, picked.name, file.id);
+      if (err) {
+        await alertDialog({ title: '無法上傳', message: `${picked.name}：${err}` });
+        return;
       }
+      file.name = picked.name;
+    }
+    file.content = content;
+    selectedId = file.id;
+  }
+
+  /** 上傳新檔案到某個分類，同名（或只能有一個的分類已有檔案）時詢問是否取代 */
+  async function uploadNew(role, picked) {
+    const errors = [];
+    for (const p of picked) {
+      const content = await p.text();
+      const existing = project.files.find((f) => f.role === role && (ROLES[role].single || f.name === p.name));
       if (existing) {
+        const ok = await confirmDialog({
+          title: '取代檔案？',
+          message: role === 'plan'
+            ? `要以 ${p.name} 的內容取代目前的參數表嗎？`
+            : `要以上傳的 ${p.name} 取代 ${existing.name} 嗎？原本的內容會被覆蓋。`,
+          confirmLabel: '取代',
+          danger: true,
+        });
+        if (!ok) continue;
+        if (role !== 'plan') {
+          const err = validateName(role, p.name, existing.id);
+          if (err) { errors.push(`${p.name}：${err}`); continue; }
+          existing.name = p.name;
+        }
         existing.content = content;
-        if (role !== 'plan') existing.name = file.name;
         selectedId = existing.id;
         continue;
       }
-      const err = validateName(role, file.name);
-      if (err) { alert(`${file.name}：${err}`); continue; }
-      const f = makeFile(role, file.name, content, role === 'extra' ? { expected: 'AC' } : {});
+      const err = validateName(role, p.name);
+      if (err) { errors.push(`${p.name}：${err}`); continue; }
+      const f = makeFile(role, p.name, content, role === 'extra' ? { expected: 'AC' } : {});
       project.files.push(f);
       selectedId = f.id;
     }
+    if (errors.length) await alertDialog({ title: '部分檔案無法上傳', message: errors.join('\n') });
   }
 </script>
 
@@ -112,9 +167,11 @@
           {#if optional(role)}<small>可選</small>{/if}
         </span>
         <span class="actions">
-          <button class="icon" title="上傳檔案" onclick={() => startUpload(role)}>⤒</button>
+          {#if role !== 'plan'}
+            <button class="icon" title={ROLES[role].single ? '上傳檔案' : '上傳新檔案（可多選）'} aria-label="上傳{ROLES[role].label}" onclick={() => pick({ role }, !ROLES[role].single)}>⤒</button>
+          {/if}
           {#if canAdd && role !== 'plan'}
-            <button class="icon" title="新增檔案" onclick={() => addFile(role)}>＋</button>
+            <button class="icon" title="新增檔案" aria-label="新增{ROLES[role].label}" onclick={() => addFile(role)}>＋</button>
           {/if}
         </span>
       </header>
@@ -122,19 +179,22 @@
         <p class="empty">{role === 'solution' || role === 'generator' ? '尚未新增' : '—'}</p>
       {/if}
       {#each files as file (file.id)}
+        {@const label = role === 'plan' ? PLAN_FORMATS[project.planFormat].label : file.name}
         <div class="file" class:selected={file.id === selectedId}>
-          <button class="name" onclick={() => (selectedId = file.id)} title={file.name}>
-            {role === 'plan' ? PLAN_FORMATS[project.planFormat].label : file.name}
-          </button>
+          <button class="name" onclick={() => (selectedId = file.id)} title={file.name}>{label}</button>
           {#if role === 'extra'}
-            <select bind:value={file.expected} title="預期結果" aria-label="預期結果">
+            <select bind:value={file.expected} title="預期結果" aria-label="{file.name} 的預期結果">
               {#each EXPECTED as v}<option value={v}>{v === 'any' ? '任意' : v}</option>{/each}
             </select>
           {/if}
-          {#if role !== 'plan'}
-            <button class="icon small" title="重新命名" onclick={() => renameFile(file)}>✎</button>
-            <button class="icon small" title="刪除" onclick={() => deleteFile(file)}>×</button>
-          {/if}
+          <span class="file-actions">
+            <button class="icon small" title="上傳並取代內容" aria-label="上傳並取代 {label}" onclick={() => pick({ file }, false)}>⤒</button>
+            <button class="icon small" title="下載" aria-label="下載 {label}" onclick={() => downloadFile(file)}>⤓</button>
+            {#if role !== 'plan'}
+              <button class="icon small" title="重新命名" aria-label="重新命名 {file.name}" onclick={() => renameFile(file)}>✎</button>
+              <button class="icon small" title="刪除" aria-label="刪除 {file.name}" onclick={() => deleteFile(file)}>×</button>
+            {/if}
+          </span>
         </div>
       {/each}
     </section>
@@ -159,7 +219,6 @@
     font-size: 12px;
     font-weight: 600;
     color: var(--muted);
-    text-transform: none;
     margin-bottom: 2px;
   }
   .group small {
@@ -187,7 +246,7 @@
     text-align: left;
     background: none;
     border: none;
-    padding: 4px 8px;
+    padding: 4px 6px;
     font: inherit;
     font-size: 13px;
     font-family: var(--mono);
@@ -198,6 +257,7 @@
     cursor: pointer;
   }
   .file.selected .name { color: var(--accent); font-weight: 600; }
+  .file-actions { display: flex; flex-shrink: 0; }
   select {
     font-size: 11px;
     padding: 1px 2px;
@@ -205,6 +265,7 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 4px;
+    flex-shrink: 0;
   }
   .icon {
     background: none;
@@ -214,10 +275,13 @@
     font-size: 14px;
     padding: 0 4px;
     border-radius: 4px;
-    line-height: 1.4;
+    line-height: 1.6;
   }
   .icon:hover { color: var(--text); background: var(--hover); }
-  .icon.small { font-size: 12px; opacity: 0; }
-  .file:hover .icon.small, .file.selected .icon.small { opacity: 1; }
-  @media (hover: none) { .icon.small { opacity: 1; } }
+  /* 按鈕一律顯示（手機上沒有滑鼠移過去的狀態，spec §4.1），未選取時顏色較淡 */
+  .icon.small { font-size: 12px; padding: 0 3px; opacity: 0.55; }
+  .file:hover .icon.small, .file.selected .icon.small, .icon.small:focus-visible { opacity: 1; }
+  @media (hover: none) {
+    .icon.small { opacity: 1; font-size: 15px; padding: 2px 6px; }
+  }
 </style>

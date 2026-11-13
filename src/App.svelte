@@ -1,25 +1,27 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import CodeEditor from './components/CodeEditor.svelte';
   import FileTree from './components/FileTree.svelte';
   import RunPanel from './components/RunPanel.svelte';
   import Docs from './components/Docs.svelte';
   import QuickRun from './components/QuickRun.svelte';
+  import Dialogs from './components/Dialogs.svelte';
   import { EXAMPLES, exampleById } from './examples/index.js';
   import {
-    PLAN_FORMATS, loadFromStorage, saveToStorage, projectToZip, projectFromZip,
-    testdataToZip, downloadBlob, emptyProject,
+    PLAN_FORMATS, projectToZip, projectFromZip, testdataToZip, downloadBlob, emptyProject,
   } from './lib/project.js';
+  import { loadProject, replaceAll, writeChanges, fileRecord, metaRecord, requestPersist } from './lib/projectStore.js';
   import { Runner, langOf, LANG_LABELS } from './lib/runner.js';
   import { IS_MOBILE } from './lib/env.js';
   import { generate, testExtras, fileOfRole } from './lib/pipeline.js';
+  import { alertDialog, confirmDialog, dialogState } from './lib/dialog.svelte.js';
 
-  const restored = loadFromStorage();
-  const initial = restored ?? exampleById('aplusb-py').build();
-  let project = $state(initial);
-  let selectedId = $state(initial.files[0]?.id);
+  // 專案由 IndexedDB 非同步載入（spec §10.1），載入完成前為 null
+  let project = $state(null);
+  let loadError = $state(null);
+  let selectedId = $state(null);
   let route = $state(location.hash);
-  let showExamples = $state(!restored);
+  let showExamples = $state(false);
 
   let genState = $state.raw(null);
   let extraState = $state.raw(null);
@@ -28,8 +30,9 @@
   let notice = $state(null);
   let saveError = $state(null);
   let dirty = $state(false);
-  let currentJson = $state('');
-  let genJson = $state(null);
+  // 專案每次修改時遞增，用來判斷測資是否過時
+  let projectVersion = $state(0);
+  let genVersion = $state(null);
 
   let stopped = false;
   const runner = new Runner({
@@ -61,68 +64,171 @@
 
   // 手機上的 C++ 提醒（spec §14.4）
   const isMobile = IS_MOBILE;
-  let hasCpp = $derived(project.files.some((f) => langOf(f.name) === 'cpp'));
+  let files = $derived(project?.files ?? []);
+  let hasCpp = $derived(files.some((f) => langOf(f.name) === 'cpp'));
 
-  let selected = $derived(project.files.find((f) => f.id === selectedId) ?? null);
+  let selected = $derived(files.find((f) => f.id === selectedId) ?? null);
   let editorLang = $derived(
     !selected ? null
       : selected.role === 'plan' ? (project.planFormat === 'py' || project.planFormat === 'js' ? project.planFormat : null)
       : langOf(selected.name),
   );
-  let checker = $derived(fileOfRole(project, 'checker'));
-  let hasExtras = $derived(project.files.some((f) => f.role === 'extra'));
-  let stale = $derived(genJson !== null && genJson !== currentJson);
+  let checker = $derived(project ? fileOfRole(project, 'checker') : null);
+  let hasExtras = $derived(files.some((f) => f.role === 'extra'));
+  let stale = $derived(genVersion !== null && genVersion !== projectVersion);
 
-  // 自動儲存到 localStorage（spec §10）
-  let saveTimer;
-  let firstSave = true;
-  $effect(() => {
-    const json = JSON.stringify(project);
-    currentJson = json;
-    if (firstSave) { firstSave = false; return; }
-    dirty = true;
+  // ---------- 自動儲存（spec §10.1）----------
+  // saved：最後一次成功寫入的內容，用來找出哪些檔案需要寫入
+  let saved = new Map();
+  let savedMeta = '';
+  let lastStructure = '';
+  let skipNextChange = false;
+  let saveTimer = null;
+  let flushing = Promise.resolve();
+  let storageOk = true;
+
+  const metaKey = (p) => JSON.stringify(metaRecord(p));
+  const structureKey = (p) => metaKey(p) + p.files.map((f) => `${f.role}\u0000${f.name}\u0000${f.expected ?? ''}`).join('\n');
+
+  function markSaved(p) {
+    saved = new Map(p.files.map((f) => [f.id, fileRecord(f)]));
+    savedMeta = metaKey(p);
+  }
+
+  function flush() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => { saveError = saveToStorage($state.snapshot(project)); }, 400);
+    saveTimer = null;
+    flushing = flushing.then(doFlush);
+    return flushing;
+  }
+
+  async function doFlush() {
+    if (!project || !storageOk) return;
+    const put = [];
+    const ids = new Set();
+    for (const f of project.files) {
+      ids.add(f.id);
+      const s = saved.get(f.id);
+      if (!s || s.content !== f.content || s.name !== f.name || s.role !== f.role || s.expected !== f.expected) put.push(fileRecord(f));
+    }
+    const del = [...saved.keys()].filter((id) => !ids.has(id));
+    const m = metaKey(project);
+    const meta = m !== savedMeta ? metaRecord(project) : null;
+    if (!put.length && !del.length && !meta) return;
+    try {
+      await writeChanges({ meta, put, del });
+      for (const r of put) saved.set(r.id, r);
+      for (const id of del) saved.delete(id);
+      if (meta) savedMeta = m;
+      saveError = null;
+    } catch (e) {
+      saveError = `無法自動儲存專案（${e?.message ?? e}）。請下載專案 zip 備份，以免遺失修改。`;
+    }
+  }
+
+  // 偵測修改：新增、刪除、重新命名與設定變更立即寫入；內容修改在停止輸入 0.4 秒後寫入
+  $effect(() => {
+    if (!project) return;
+    const structure = structureKey(project);
+    for (const f of project.files) void f.content;
+    untrack(() => {
+      const structural = structure !== lastStructure;
+      lastStructure = structure;
+      if (skipNextChange) { skipNextChange = false; return; }
+      projectVersion++;
+      dirty = true;
+      if (structural) flush();
+      else {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(flush, 400);
+      }
+    });
   });
 
+  function setProject(p) {
+    skipNextChange = true;
+    project = p;
+    selectedId = p.files[0]?.id ?? null;
+    genState = null;
+    extraState = null;
+    genVersion = null;
+    dirty = false;
+  }
+
   onMount(() => {
+    (async () => {
+      try {
+        const res = await loadProject();
+        if (res) {
+          markSaved(res.project);
+          setProject(res.project);
+        } else {
+          const p = exampleById('aplusb-py').build();
+          setProject(p);
+          showExamples = true;
+          await replaceAll(p);
+          markSaved(p);
+        }
+      } catch (e) {
+        // 無法使用 IndexedDB（例如瀏覽器限制）：仍可使用，但不會自動儲存
+        storageOk = false;
+        loadError = `無法讀取或儲存專案（${e?.message ?? e}）。這次的修改不會自動儲存，請記得下載專案 zip 備份。`;
+        setProject(exampleById('aplusb-py').build());
+        showExamples = true;
+      }
+      requestPersist();
+    })();
+
     const onHash = () => (route = location.hash);
+    // 離開網頁或切到背景時盡量寫入尚未儲存的修改（手機上 visibilitychange 比 beforeunload 可靠）
+    const onHide = () => { if (document.visibilityState === 'hidden') flush(); };
+    const onUnload = () => { flush(); };
     window.addEventListener('hashchange', onHash);
     window.addEventListener('popstate', onHash);
-    const onUnload = () => saveToStorage($state.snapshot(project));
+    document.addEventListener('visibilitychange', onHide);
     window.addEventListener('beforeunload', onUnload);
     return () => {
       window.removeEventListener('hashchange', onHash);
       window.removeEventListener('popstate', onHash);
+      document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('beforeunload', onUnload);
     };
   });
 
-  function replaceProject(p) {
-    project = p;
-    selectedId = p.files[0]?.id;
-    genState = null;
-    extraState = null;
-    genJson = null;
-    dirty = false;
-    firstSave = true;
-    saveError = saveToStorage($state.snapshot(project));
+  async function replaceProject(p) {
+    clearTimeout(saveTimer);
+    await flushing;
+    setProject(p);
+    if (!storageOk) return;
+    try {
+      await replaceAll(p);
+      markSaved(p);
+      saveError = null;
+    } catch (e) {
+      saveError = `無法自動儲存專案（${e?.message ?? e}）。請下載專案 zip 備份，以免遺失修改。`;
+    }
   }
 
-  function confirmDiscard() {
-    return !dirty || confirm('目前的專案有尚未下載備份的修改，載入後會被取代。確定要繼續嗎？');
+  async function confirmDiscard(action) {
+    if (!dirty) return true;
+    return confirmDialog({
+      title: `${action}？`,
+      message: '目前的專案會被取代，而且有修改尚未下載備份。若需要保留，請先按「下載專案」。',
+      confirmLabel: action,
+      danger: true,
+    });
   }
 
-  function loadExample(id) {
-    if (!confirmDiscard()) return;
-    replaceProject(exampleById(id).build());
+  async function loadExample(id) {
+    if (!(await confirmDiscard('載入範例'))) return;
+    await replaceProject(exampleById(id).build());
     showExamples = false;
     location.hash = '';
   }
 
-  function newProject() {
-    if (!confirmDiscard()) return;
-    replaceProject(emptyProject());
+  async function newProject() {
+    if (!(await confirmDiscard('建立新專案'))) return;
+    await replaceProject(emptyProject());
   }
 
   function setPlanFormat(fmt) {
@@ -155,16 +261,16 @@
     stopped = false;
     extraState = null;
     genState = null;
-    genJson = null;
+    genVersion = null;
     const snap = $state.snapshot(project);
-    const json = JSON.stringify(snap);
+    const version = projectVersion;
     try {
       const final = await generate(snap, runner, {
         onUpdate: throttled((s) => (genState = copyGen(s))),
         isStopped: () => stopped,
       });
       genState = copyGen(final);
-      genJson = json;
+      genVersion = version;
     } catch (e) {
       genState = { plan: null, tests: [], ok: false, done: true, error: `內部錯誤：${e.message}` };
     } finally {
@@ -218,14 +324,24 @@
   async function onUploadProject(e) {
     const file = e.target.files[0];
     e.target.value = '';
-    if (!file || !confirmDiscard()) return;
+    if (!file) return;
+    let p;
     try {
-      replaceProject(await projectFromZip(file));
+      p = await projectFromZip(file);
     } catch (err) {
-      alert(`無法載入專案：${err.message}`);
+      await alertDialog({ title: '無法載入專案', message: err.message });
+      return;
     }
+    if (!(await confirmDiscard('上傳專案'))) return;
+    await replaceProject(p);
+  }
+
+  function onKeydown(e) {
+    if (e.key === 'Escape' && showExamples && !dialogState.current) showExamples = false;
   }
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <div class="app">
   <header class="top">
@@ -237,15 +353,17 @@
     </nav>
     <span class="spacer"></span>
     <div class="menu">
-      <button onclick={() => (showExamples = true)}>範例</button>
-      <button onclick={newProject}>新專案</button>
-      <button onclick={() => projectInput.click()}>⤒ 上傳專案</button>
-      <button onclick={onDownloadProject}>⤓ 下載專案</button>
+      <button onclick={() => (showExamples = true)} disabled={!project}>範例</button>
+      <button onclick={newProject} disabled={!project}>新專案</button>
+      <button onclick={() => projectInput.click()} disabled={!project}>⤒ 上傳專案</button>
+      <button onclick={onDownloadProject} disabled={!project}>⤓ 下載專案</button>
       <input type="file" accept=".zip" class="hidden" bind:this={projectInput} onchange={onUploadProject} />
     </div>
   </header>
 
-  {#if saveError}
+  {#if loadError}
+    <div class="banner">{loadError}</div>
+  {:else if saveError}
     <div class="banner">{saveError}</div>
   {/if}
   {#if notice}
@@ -257,6 +375,8 @@
 
   {#if route === '#/docs'}
     <Docs />
+  {:else if !project}
+    <p class="loading" role="status">載入專案中…</p>
   {:else if route === '#/run'}
     <QuickRun
       {runner} {project} {genState} {envMessage}
@@ -337,6 +457,8 @@
       </div>
     </div>
   {/if}
+
+  <Dialogs />
 </div>
 
 <style>
@@ -360,6 +482,7 @@
   .menu { display: flex; gap: 6px; flex-wrap: wrap; }
   .banner .link { border: none; background: none; color: var(--accent); padding: 0 4px; text-decoration: underline; }
   .banner { background: var(--warning-soft); color: var(--text); padding: 6px 16px; font-size: 13px; border-bottom: 1px solid var(--border); }
+  .loading { color: var(--muted); padding: 24px; margin: 0; }
   .settings {
     display: flex;
     gap: 16px;
@@ -375,7 +498,7 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 230px minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: 260px minmax(0, 1fr) minmax(0, 1fr);
   }
   .side { border-right: 1px solid var(--border); background: var(--surface-2); min-height: 0; }
   .editor-pane { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); }
@@ -390,7 +513,7 @@
     .app { height: auto; min-height: 100vh; }
     /* minmax(0, 1fr) 防止長程式行或寬表格把欄位撐得比螢幕還寬 */
     .work { grid-template-columns: minmax(0, 1fr); }
-    .side { border-right: none; border-bottom: 1px solid var(--border); max-height: 260px; }
+    .side { border-right: none; border-bottom: 1px solid var(--border); max-height: 300px; }
     .editor-pane { height: 60vh; border-right: none; border-bottom: 1px solid var(--border); }
   }
   .overlay {

@@ -1,5 +1,5 @@
 <script>
-  import { formatSize, byteLength } from '../lib/project.js';
+  import { formatSize, byteLength, downloadBlob } from '../lib/project.js';
   import { summarizeBySubtask } from '../lib/pipeline.js';
 
   let {
@@ -32,6 +32,15 @@
       case 'running': return '執行中…';
       default: return '等待中';
     }
+  }
+
+  // 下載目前預覽的 .in / .out（spec §4.1）
+  function downloadPreview() {
+    const t = selectedTest;
+    if (!t || previewTab === 'log') return;
+    const text = previewTab === 'in' ? t.input : t.output;
+    if (text == null) return;
+    downloadBlob(new Blob([text], { type: 'text/plain' }), `${t.index}.${previewTab}`);
   }
 
   function fmtTime(ms) {
@@ -103,6 +112,9 @@
           <button class:active={previewTab === 'log'} onclick={() => (previewTab = 'log')}>除錯輸出</button>
         {/if}
         <span class="spacer"></span>
+        {#if previewTab !== 'log'}
+          <button onclick={downloadPreview} disabled={(previewTab === 'in' ? selectedTest.input : selectedTest.output) == null}>⤓ 下載 {selectedTest.index}.{previewTab}</button>
+        {/if}
         <button class="close" onclick={() => (selected = null)} aria-label="關閉預覽">×</button>
       </div>
       <pre class="content">{preview(previewTab === 'in' ? selectedTest.input : previewTab === 'out' ? selectedTest.output : selectedTest.log)}</pre>
