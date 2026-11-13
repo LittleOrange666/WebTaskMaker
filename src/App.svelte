@@ -11,6 +11,7 @@
     testdataToZip, downloadBlob, emptyProject,
   } from './lib/project.js';
   import { Runner, langOf, LANG_LABELS } from './lib/runner.js';
+  import { IS_MOBILE } from './lib/env.js';
   import { generate, testExtras, fileOfRole } from './lib/pipeline.js';
 
   const restored = loadFromStorage();
@@ -31,20 +32,35 @@
   let genJson = $state(null);
 
   let stopped = false;
-  const runner = new Runner({ onStatus: (status, detail) => (envStatus = { status, detail }) });
+  const runner = new Runner({
+    onStatus: (status, detail) => {
+      // 狀態種類改變時重新計時（同一種狀態只更新進度，不重新計時）
+      const since = status === envStatus.status ? envStatus.since : Date.now();
+      envStatus = { status, detail, since };
+    },
+  });
+
+  // 每秒更新一次，用來顯示已經過的時間（手機上編譯可能要數分鐘）
+  let now = $state(Date.now());
+  onMount(() => {
+    const t = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(t);
+  });
 
   // 執行環境的狀態訊息（Python / C++ 編譯器載入、C++ 編譯中）
   let envMessage = $derived.by(() => {
-    const { status, detail } = envStatus;
-    if (status === 'loading-python') return '正在載入 Python 執行環境（首次約需數秒到數十秒）…';
+    const { status, detail, since } = envStatus;
+    const secs = since ? Math.floor((now - since) / 1000) : 0;
+    const elapsed = secs >= 3 ? `（已 ${secs} 秒）` : '';
+    if (status === 'loading-python') return `正在載入 Python 執行環境（首次約需數秒到數十秒）…${elapsed}`;
     if (status === 'loading-cpp') return `正在下載 C++ 編譯器（約 18 MB，只需下載一次）… ${detail ?? 0}%`;
-    if (status === 'compiling-cpp') return `正在編譯 C++${typeof detail === 'string' ? `：${detail}` : ''}…`;
+    if (status === 'preparing-cpp') return `下載完成，正在準備 C++ 編譯器…${elapsed}`;
+    if (status === 'compiling-cpp') return `正在編譯 C++${detail ? `：${detail}` : ''}…${elapsed}`;
     return '';
   });
 
   // 手機上的 C++ 提醒（spec §14.4）
-  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-    || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+  const isMobile = IS_MOBILE;
   let hasCpp = $derived(project.files.some((f) => langOf(f.name) === 'cpp'));
 
   let selected = $derived(project.files.find((f) => f.id === selectedId) ?? null);

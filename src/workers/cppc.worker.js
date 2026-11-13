@@ -1,17 +1,46 @@
 // C++ 編譯 Worker（spec §14.1、§14.2）：載入 WASM 版 clang 並重複使用
 import stdcppH from '../runtime/cpp/bits/stdc++.h?raw';
 import testlibH from '../runtime/cpp/testlib.h?raw';
-import { CLANG_BASE } from '../lib/config.js';
 
 let clangPromise = null;
+let clangBase = null; // 由主執行緒在 init 時傳入
+let resourcesPromise = null;
+
 function loadClang() {
   if (!clangPromise) {
-    clangPromise = import(/* @vite-ignore */ CLANG_BASE + 'bundle.js').catch((e) => {
+    clangPromise = import(/* @vite-ignore */ clangBase + 'bundle.js').catch((e) => {
       clangPromise = null;
       throw e;
     });
   }
   return clangPromise;
+}
+
+/**
+ * 預先下載編譯器的資源檔並回報進度。
+ * runClang 內部會先執行一次 clang -###，而那一次不會把 fetchProgress 傳下去，
+ * 所以必須自己先以 runClang(null, ...) 觸發下載，進度才會回報到這裡。
+ */
+function loadResources() {
+  if (!resourcesPromise) {
+    resourcesPromise = (async () => {
+      const { runClang } = await loadClang();
+      let lastPct = -1;
+      await runClang(null, {}, {
+        fetchProgress: ({ doneLength, totalLength }) => {
+          const pct = totalLength ? Math.floor((doneLength / totalLength) * 100) : 0;
+          if (pct !== lastPct) {
+            lastPct = pct;
+            self.postMessage({ type: 'progress', done: doneLength, total: totalLength });
+          }
+        },
+      });
+    })().catch((e) => {
+      resourcesPromise = null;
+      throw e;
+    });
+  }
+  return resourcesPromise;
 }
 
 const headers = { 'testlib.h': testlibH, bits: { 'stdc++.h': stdcppH } };
@@ -25,10 +54,11 @@ function concat(chunks) {
 
 async function compile({ src, filename, compileFlags, linkFlags }) {
   const { runClang } = await loadClang();
+  await loadResources();
+  self.postMessage({ type: 'compiling' });
   const dec = new TextDecoder();
   let stderr = '';
   const onErr = (b) => { if (b) stderr += dec.decode(b, { stream: true }); };
-  const fetchProgress = (e) => self.postMessage({ type: 'progress', done: e.doneLength, total: e.totalLength });
   const name = /^[\w.-]+\.(cpp|cc|cxx)$/.test(filename) ? filename : 'main.cpp';
   const objName = name.replace(/\.[^.]+$/, '.o');
 
@@ -36,7 +66,7 @@ async function compile({ src, filename, compileFlags, linkFlags }) {
   const chunks = [];
   try {
     await runClang(['clang++', ...compileFlags, '-I.', '-c', name, '-o', '-'], { [name]: src, ...headers },
-      { stdout: (b) => { if (b) chunks.push(b.slice()); }, stderr: onErr, fetchProgress });
+      { stdout: (b) => { if (b) chunks.push(b.slice()); }, stderr: onErr });
   } catch (e) {
     if (e?.code === undefined && !stderr) throw e; // 不是編譯錯誤（例如載入失敗）
     return { ok: false, error: stderr.trim() || e.message };
@@ -52,6 +82,7 @@ async function compile({ src, filename, compileFlags, linkFlags }) {
 self.onmessage = async (e) => {
   const msg = e.data;
   if (msg.type === 'init') {
+    clangBase = msg.clangBase;
     try {
       await loadClang();
       self.postMessage({ type: 'ready' });

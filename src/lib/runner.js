@@ -1,5 +1,7 @@
 // 管理執行使用者程式的 Web Worker，處理逾時與中止（spec §7.1、§7.2、§14）
-import { CPP_COMPILE_FLAGS, CPP_LINK_FLAGS, CPP_COMPILE_TIMEOUT_MS } from './config.js';
+import { CPP_COMPILE_FLAGS, CPP_LINK_FLAGS, CPP_COMPILE_TIMEOUT_MS, CLANG_VERSION, resolveClangBase } from './config.js';
+import { cacheKey, getCached, putCached } from './compileCache.js';
+import { IS_MOBILE } from './env.js';
 
 export function langOf(filename) {
   if (/\.py$/i.test(filename)) return 'py';
@@ -23,6 +25,12 @@ function createWorker(kind) {
 
 const EMPTY = { stdout: '', out2: '', stderr: '' };
 
+function tleMessage(timeoutMs) {
+  const base = `執行超過 ${timeoutMs / 1000} 秒`;
+  // 手機的執行速度比電腦慢很多，提示可以調高逾時（不自動放寬，避免影響「預期 TLE」的判定）
+  return IS_MOBILE ? `${base}（手機的執行速度較慢，可在「工作區」上方調高逾時設定）` : base;
+}
+
 function stoppedError() {
   const err = new Error('已停止');
   err.stopped = true;
@@ -30,7 +38,7 @@ function stoppedError() {
 }
 
 export class Runner {
-  /** onStatus(status, detail)：status 為 idle / loading-python / loading-cpp / compiling-cpp */
+  /** onStatus(status, detail)：status 為 idle / loading-python / loading-cpp / preparing-cpp / compiling-cpp */
   constructor({ onStatus } = {}) {
     this.entries = {};
     this.pending = new Map();
@@ -55,8 +63,12 @@ export class Runner {
         entry.rejectReady(new Error(m.error));
         this._drop(kind, entry);
       } else if (m.type === 'progress') {
+        // 下載完成後瀏覽器仍需時間編譯 75 MB 的編譯器模組，顯示為「準備中」
         const pct = m.total ? Math.floor((m.done / m.total) * 100) : 0;
-        this.onStatus(pct >= 100 ? 'compiling-cpp' : 'loading-cpp', pct);
+        if (m.done >= m.total) this.onStatus('preparing-cpp');
+        else this.onStatus('loading-cpp', pct);
+      } else if (m.type === 'compiling') {
+        this.onStatus('compiling-cpp', this.compilingFile);
       } else if (m.type === 'result') {
         const p = this.pending.get(m.id);
         if (p) { this.pending.delete(m.id); p.resolve(m.result); }
@@ -71,7 +83,7 @@ export class Runner {
       }
       this._drop(kind, entry);
     };
-    w.postMessage({ type: 'init' });
+    w.postMessage(kind === 'cppc' ? { type: 'init', clangBase: resolveClangBase(document.baseURI) } : { type: 'init' });
     this.entries[kind] = entry;
     return entry;
   }
@@ -128,26 +140,35 @@ export class Runner {
   }
 
   /**
-   * 編譯 C++，結果依「編譯參數 + 原始碼」快取（spec §14.2）。
+   * 編譯 C++，結果依「編譯器版本 + 編譯參數 + 原始碼」快取（spec §14.2）：
+   * 記憶體中快取，成功的結果另存到 IndexedDB，重新整理或隔天再開都不必重新編譯。
    * 回傳 { ok: true, key, wasm } 或 { ok: false, error, stopped? }
    */
   compileCpp(code, filename) {
-    const key = `${CPP_COMPILE_FLAGS.join(' ')}\n${CPP_LINK_FLAGS.join(' ')}\n${code}`;
-    if (!this.cppCache.has(key)) {
-      const p = this._compileCpp(code, filename).then((r) => {
+    const text = `${CLANG_VERSION}\n${CPP_COMPILE_FLAGS.join(' ')}\n${CPP_LINK_FLAGS.join(' ')}\n${code}`;
+    if (!this.cppCache.has(text)) {
+      const p = (async () => {
+        const key = await cacheKey(text);
+        const cached = await getCached(key);
+        if (cached) return { ok: true, key, wasm: cached, fromCache: true };
+        const r = await this._compileCpp(code, filename);
+        if (!r.ok) return r;
+        putCached(key, r.wasm);
+        return { ...r, key };
+      })().then((r) => {
         // 停止、逾時或內部錯誤不快取，下次重新編譯
-        if (r.stopped || r.internal) this.cppCache.delete(key);
-        return r.ok ? { ...r, key } : r;
+        if (r.stopped || r.internal) this.cppCache.delete(text);
+        return r;
       });
-      this.cppCache.set(key, p);
+      this.cppCache.set(text, p);
     }
-    return this.cppCache.get(key);
+    return this.cppCache.get(text);
   }
 
   async _compileCpp(code, filename) {
     const { entry, result } = await this._readyOrResult('cppc', 'C++ 編譯器');
     if (!entry) return { ok: false, error: result.message, stopped: result.status === 'stopped', internal: true };
-    this.onStatus('compiling-cpp', filename);
+    this.compilingFile = filename;
     try {
       return await this._request(entry, {
         type: 'compile',
@@ -188,7 +209,7 @@ export class Runner {
       }
     }
     const send = () => this._request(entry, { type: 'run', req: msgReq }, timeoutMs, {
-      onTimeout: () => ({ status: 'tle', message: `執行超過 ${timeoutMs / 1000} 秒`, time: timeoutMs, ...EMPTY }),
+      onTimeout: () => ({ status: 'tle', message: tleMessage(timeoutMs), time: timeoutMs, ...EMPTY }),
       onError: (message) => ({ status: 'error', message, ...EMPTY }),
     });
     let res = await send();
