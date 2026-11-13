@@ -279,6 +279,102 @@ out.print(p, q)    # 寫入 .out
 `),
     ]),
   },
+  {
+    id: 'sum-cpp',
+    title: '數列總和（C++ + testlib，實驗性）',
+    description: '以 testlib 撰寫生成器、驗證器（--group）與 checker，並附一份用 int 而溢位、預期 WA 的解答。第一次執行需下載約 18 MB 的編譯器。',
+    build: () => proj({ mode: 'infer', planFormat: 'tps' }, [
+      f('plan', 'gen_data.txt', `@subtask samples
+manual sample1.in
+
+@subtask small
+@include samples
+gen_sum 10 10
+gen_sum 10 1000000000
+
+@subtask large
+@include small
+gen_sum 200000 1000000000
+gen_sum 200000 1000000000 seed=7
+`),
+      f('generator', 'gen_sum.cpp', `#include "testlib.h"
+#include <iostream>
+using namespace std;
+
+// 參數：n 最大值
+// testlib 依全部參數決定亂數種子，所以同一行參數會產生相同結果
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int n = opt<int>(1);
+    int maxv = opt<int>(2);
+    cout << n << "\\n";
+    for (int i = 0; i < n; i++) cout << rnd.next(1, maxv) << " \\n"[i == n - 1];
+}
+`),
+      f('solution', 'sol.cpp', `#include <bits/stdc++.h>
+using namespace std;
+
+int main() {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+    int n;
+    cin >> n;
+    long long sum = 0;   // 注意：瀏覽器中 long 是 32 位元，請用 long long
+    for (int i = 0; i < n; i++) {
+        long long x;
+        cin >> x;
+        sum += x;
+    }
+    cout << sum << "\\n";
+}
+`),
+      f('manual', 'sample1.in', '3\n1 2 3\n'),
+      f('manual', 'sample1.out', '6\n'),
+      f('validator', 'validator.cpp', `#include "testlib.h"
+#include <string>
+using namespace std;
+
+// 屬於子任務時會傳入 --group <子任務名稱>，用 validator.group() 取得
+int main(int argc, char* argv[]) {
+    registerValidation(argc, argv);
+    string g = validator.group();
+    int maxn = (g == "samples" || g == "small") ? 10 : 200000;
+    int n = inf.readInt(1, maxn, "n");
+    inf.readEoln();
+    inf.readInts(n, 1, 1000000000, "a");
+    inf.readEoln();
+    inf.readEof();
+}
+`),
+      f('checker', 'checker.cpp', `#include "testlib.h"
+
+// 以 checker <input> <output> <answer> 執行；結束碼 0 = AC、1 = WA、2 = PE
+int main(int argc, char* argv[]) {
+    registerTestlibCmd(argc, argv);
+    long long expected = ans.readLong();
+    long long found = ouf.readLong();
+    if (expected != found) quitf(_wa, "expected %lld, found %lld", expected, found);
+    quitf(_ok, "answer is %lld", found);
+}
+`),
+      f('extra', 'wrong_int.cpp', `#include <bits/stdc++.h>
+using namespace std;
+
+// 錯誤解：用 int 存總和，大測資會溢位
+int main() {
+    int n;
+    cin >> n;
+    int sum = 0;
+    for (int i = 0; i < n; i++) {
+        int x;
+        cin >> x;
+        sum += x;
+    }
+    cout << sum << "\\n";
+}
+`, { expected: 'WA' }),
+    ]),
+  },
 ];
 
 export function exampleById(id) {

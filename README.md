@@ -26,17 +26,25 @@ node scripts/serve-subpath.mjs 4173 /some/path/
 
 然後開啟 http://localhost:4173/some/path/ 。
 
-Python 執行環境（Pyodide 0.27.2）於第一次執行 Python 程式時從 jsDelivr CDN 載入，版本設定在 `src/lib/config.js`。
+Python 執行環境（Pyodide）與 C++ 編譯器（`@yowasp/clang`，實驗性）於第一次使用時從 jsDelivr CDN 載入固定版本，設定在 `src/lib/config.js`。C++ 的實驗結果見 [docs/cpp-experiment.md](docs/cpp-experiment.md)。
+
+內建的 `src/runtime/cpp/testlib.h` 是修改過的 testlib（可以用 `-fno-exceptions` 編譯），由原版產生：
+
+```bash
+node scripts/patch-testlib.mjs path/to/original/testlib.h
+```
 
 ## 程式結構
 
 | 路徑 | 說明 |
 | --- | --- |
 | `src/App.svelte` | 主畫面、狀態管理、下載與上傳 |
-| `src/components/` | 檔案列表、程式編輯器（CodeMirror 6）、執行結果、使用說明 |
+| `src/components/` | 檔案列表、程式編輯器（CodeMirror 6）、執行結果、簡單測試、使用說明 |
 | `src/lib/tps.js`、`freemarker.js` | 參數表解析 |
 | `src/lib/pipeline.js` | 產生測資、驗證、比對、測試額外解答 |
 | `src/lib/runner.js` | Web Worker 管理、逾時與停止 |
 | `src/lib/project.js` | 專案資料、localStorage、zip |
-| `src/runtime/` | 在 Worker 中執行使用者程式：`jsExec.js`、`genlib.js`（JS 內建函式庫）、`gen.py`、`bootstrap.py`（Python） |
+| `src/runtime/` | 在 Worker 中執行使用者程式：`jsExec.js`、`genlib.js`（JS 內建函式庫）、`gen.py`、`bootstrap.py`（Python）、`cppExec.js`（C++ / WASI） |
+| `src/runtime/cpp/` | C++ 內建標頭檔：`bits/stdc++.h` 替代檔、修改過的 `testlib.h` |
+| `src/workers/` | `js` / `py` 執行 Worker、`cppc`（C++ 編譯）、`cppx`（執行編譯好的 C++） |
 | `src/examples/` | 範例專案 |

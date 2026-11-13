@@ -26,8 +26,20 @@ function stoppedError() {
 
 async function runFile(runner, file, req, timeoutMs) {
   const lang = langOf(file.name);
-  if (!lang) return { status: 'error', message: `無法從檔名 ${file.name} 判斷語言（需為 .py 或 .js）`, stdout: '', out2: '', stderr: '' };
+  if (!lang) return { status: 'error', message: `無法從檔名 ${file.name} 判斷語言（需為 .py、.js 或 .cpp）`, stdout: '', out2: '', stderr: '' };
   return runner.run(lang, { ...req, code: file.content, filename: file.name }, timeoutMs);
+}
+
+/** 生成器的命令列參數；C++ 生成器把明確指定的 seed= 附加為最後一個參數（spec §14.3） */
+export function generatorArgv(file, test) {
+  if (langOf(file.name) === 'cpp' && test.seedArg !== undefined) return [...test.args, `seed=${test.seedArg}`];
+  return test.args;
+}
+
+/** 驗證器的命令列參數；C++ 使用 testlib 的 --group 慣例 */
+export function validatorArgv(file, subtask) {
+  if (!subtask) return [];
+  return langOf(file.name) === 'cpp' ? ['--group', subtask] : [subtask];
 }
 
 function describeFailure(res) {
@@ -138,12 +150,13 @@ export async function generate(project, runner, { onUpdate = () => {}, isStopped
       } else {
         const g = generators.get(t.gen);
         if (!g) { fail(r, 'gen', `找不到生成器 ${t.gen}（請確認檔名為 ${t.gen}.py 或 ${t.gen}.js）`); emit(); continue; }
-        const res = await runFile(runner, g, { role: 'generator', argv: t.args, seed: t.seed, stdin: '' }, timeoutMs);
+        const res = await runFile(runner, g, { role: 'generator', argv: generatorArgv(g, t), seed: t.seed, stdin: '' }, timeoutMs);
         if (res.status === 'stopped') throw stoppedError();
         r.log += res.stderr ?? '';
         if (res.status !== 'ok') { fail(r, 'gen', `生成器錯誤：${describeFailure(res)}`); emit(); continue; }
         r.input = res.stdout;
-        if (direct) expected = res.out2;
+        // 生成器沒有寫出 .out 時視為未提供（交給標準解答，或報錯）
+        if (direct && res.out2) expected = res.out2;
       }
 
       // 2. 驗證
@@ -151,7 +164,7 @@ export async function generate(project, runner, { onUpdate = () => {}, isStopped
         const sts = t.subtasks.length ? t.subtasks : [null];
         let bad = null;
         for (const st of sts) {
-          const res = await runFile(runner, validator, { role: 'validator', argv: st ? [st] : [], stdin: r.input }, timeoutMs);
+          const res = await runFile(runner, validator, { role: 'validator', argv: validatorArgv(validator, st), stdin: r.input }, timeoutMs);
           if (res.status === 'stopped') throw stoppedError();
           if (res.status !== 'ok') { bad = `驗證失敗${st ? `（子任務 ${st}）` : ''}：${describeFailure(res)}`; break; }
         }
@@ -174,7 +187,7 @@ export async function generate(project, runner, { onUpdate = () => {}, isStopped
       } else if (expected !== null) {
         r.output = expected;
       } else {
-        fail(r, 'solve', direct ? '生成器沒有寫入輸出（out.print），也沒有標準解答' : '沒有標準解答，無法產生輸出');
+        fail(r, 'solve', direct ? '生成器沒有寫出 .out（Python / JS 用 out.print()，C++ 寫入檔案 answer.out），也沒有標準解答' : '沒有標準解答，無法產生輸出');
         emit();
         continue;
       }

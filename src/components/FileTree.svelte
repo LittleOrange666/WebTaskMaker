@@ -38,7 +38,7 @@
   function validateName(role, name, exceptId = null) {
     if (!name || /[\/\\]/.test(name)) return '檔名不可為空，也不可包含斜線';
     if (/\s/.test(name)) return '檔名不可包含空白';
-    if (needsLang(role) && !langOf(name)) return '程式檔名需以 .py 或 .js 結尾';
+    if (needsLang(role) && !langOf(name)) return '程式檔名需以 .py、.js 或 .cpp 結尾';
     if (project.files.some((f) => f.role === role && f.name === name && f.id !== exceptId)) return `已經有名為 ${name} 的檔案`;
     return null;
   }

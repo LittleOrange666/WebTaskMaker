@@ -8,6 +8,8 @@
     ['lib', '內建函式庫'],
     ['run', '執行與錯誤'],
     ['save', '儲存與下載'],
+    ['cpp', 'C++（實驗性）'],
+    ['quick', '簡單測試'],
   ];
 
   function jump(id) {
@@ -57,7 +59,7 @@
         <tr><td>額外解答</td><td></td><td>可以有多份，各自標記預期結果：AC / WA / TLE / RE / 任意</td></tr>
       </tbody>
     </table>
-    <p>程式可以用 Python（<code>.py</code>）或 JavaScript（<code>.js</code>）撰寫，由副檔名決定，同一專案中可以混用。第一次執行 Python 時會從 CDN 下載 Pyodide 執行環境，需要數秒到數十秒。</p>
+    <p>程式可以用 Python（<code>.py</code>）、JavaScript（<code>.js</code>）或 C++（<code>.cpp</code>，實驗性功能，見<button class="inline" onclick={() => jump('cpp')}>C++ 一節</button>）撰寫，由副檔名決定，同一專案中可以混用。第一次執行 Python 時會從 CDN 下載 Pyodide 執行環境，需要數秒到數十秒。</p>
 
     <h2 id="doc-iface">程式介面</h2>
     <p>所有程式都模擬傳統命令列程式：從標準輸入讀、寫到標準輸出、從命令列參數取得參數。</p>
@@ -226,6 +228,57 @@ test("gen_random", 200000, 1, 10**9, seed=1)`}</pre>
       <li>localStorage 容量有限（約 5MB），手生測資很大時可能無法自動儲存，請用「⤓ 下載專案」備份成 zip，之後可用「⤒ 上傳專案」還原。</li>
       <li>測資 zip 內容：<code>1.in</code>、<code>1.out</code>、<code>2.in</code>…，以及記錄子任務包含哪些測資編號的 <code>subtasks.json</code>。checker 不包含在測資 zip 中，請用「⤓ 下載 checker」另外下載。</li>
     </ul>
+
+    <h2 id="doc-cpp">C++（實驗性功能）</h2>
+    <p>C++ 程式會在瀏覽器中用 WebAssembly 版的 clang 編譯後執行。第一次執行 C++ 時需要從 CDN 下載約 18 MB 的編譯器（之後由瀏覽器快取）。編譯參數為 <code>-std=c++20 -O2 -fno-exceptions</code>；一般程式約需 2 秒，使用 testlib 的程式約需 5 秒。同一份程式碼只會編譯一次。</p>
+    <p>建議使用桌面瀏覽器：編譯時需要數百 MB 記憶體，在手機上可能會失敗。</p>
+
+    <h3>程式介面（testlib 慣例）</h3>
+    <table>
+      <thead><tr><th>角色</th><th>介面</th></tr></thead>
+      <tbody>
+        <tr><td>生成器</td><td>參數由 <code>argv</code> 取得（可用 testlib 的 <code>registerGen(argc, argv, 1)</code>、<code>opt&lt;int&gt;(1)</code>、<code>rnd</code>），輸出到 stdout 即為 <code>.in</code>。testlib 依全部參數決定種子；參數表中的 <code>seed=值</code> 會以 <code>seed=值</code> 附加為最後一個參數。直接生成輸入輸出模式下，把 <code>.out</code> 寫到檔案 <code>answer.out</code>。</td></tr>
+        <tr><td>解答</td><td>從 stdin 讀、寫到 stdout。</td></tr>
+        <tr><td>格式驗證器</td><td>從 stdin 讀；屬於子任務時會傳入 <code>--group 子任務名稱</code>，可用 testlib 的 <code>validator.group()</code> 取得。結束碼 0 為通過。</td></tr>
+        <tr><td>checker</td><td>以 <code>checker input output answer</code> 的形式取得三個檔案（testlib 的 <code>registerTestlibCmd</code>）。結束碼 0 = AC、1 = WA、2 = PE，其他 = checker 失敗。</td></tr>
+      </tbody>
+    </table>
+    <pre>{`#include "testlib.h"
+#include <iostream>
+
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int n = opt<int>(1);
+    std::cout << n << "
+";
+    for (int i = 0; i < n; i++) std::cout << rnd.next(1, 100) << " 
+"[i == n - 1];
+}`}</pre>
+
+    <h3>內建標頭檔</h3>
+    <ul>
+      <li><code>#include &lt;bits/stdc++.h&gt;</code>：可以使用（內建替代檔）。</li>
+      <li><code>#include "testlib.h"</code>：內建修改過的版本，把需要 C++ 例外的部分改寫成不需要例外的寫法，行為與原版相同。下載 checker 到評測端使用時，請搭配原版 testlib.h。</li>
+    </ul>
+
+    <h3>已知限制</h3>
+    <ul>
+      <li><strong>不能使用 C++ 例外</strong>：程式中不能寫 <code>try</code> / <code>throw</code>，標準函式庫的錯誤（例如 <code>std::stoi</code> 失敗）會直接中止程式。</li>
+      <li><strong>遞迴深度約 5,000 層</strong>：受瀏覽器限制，無法調整。遞迴太深時程式會當掉（標示為執行錯誤），但在評測機上可能是正常的。對大測資請使用非遞迴的寫法。</li>
+      <li><strong><code>long</code> 是 32 位元</strong>：指標與 <code>long</code> 都是 4 bytes，<code>long</code> 存超過 2<sup>31</sup> 的數會溢位，在評測機上卻可能正常。請改用 <code>long long</code>（<code>__int128</code> 也可以使用）。</li>
+      <li>執行時間比原生慢，僅供參考。</li>
+    </ul>
+
+    <h2 id="doc-quick">簡單測試</h2>
+    <p>上方導覽列的「簡單測試」頁面可以直接執行一段程式：選擇語言（C++ / Python / JavaScript）、貼上程式碼、填入輸入（stdin），按「▶ 執行」（或 Ctrl + Enter）就能看到輸出。</p>
+    <ul>
+      <li>可以填入命令列參數（以空白分隔），也可以上傳檔案作為輸入。</li>
+      <li>「從專案載入程式」會把專案中的程式複製到編輯器；「從專案載入輸入」可以選擇手生測資或已產生的測資。修改複本不會影響專案。</li>
+      <li>程式以「解答」的介面執行；Python / JS 可以使用內建函式庫，亂數種子固定為 0。逾時設定與工作區相同。</li>
+      <li>輸出可以複製或下載；執行錯誤、編譯錯誤會顯示在「訊息」分頁。</li>
+      <li>簡單測試的內容會自動儲存在瀏覽器中，與專案分開，不會包含在專案 zip 裡。</li>
+      <li>工作區正在產生測資時無法執行，請等待完成或先停止。</li>
+    </ul>
   </article>
 </div>
 
@@ -251,6 +304,7 @@ test("gen_random", 200000, 1, 10**9, seed=1)`}</pre>
   .toc strong { margin-bottom: 6px; }
   .toc button { text-align: left; border: none; background: none; color: var(--muted); padding: 4px 8px; }
   .toc button:hover { color: var(--text); }
+  .inline { border: none; background: none; color: var(--accent); padding: 0; font-size: inherit; text-decoration: underline; }
   article { line-height: 1.7; padding-bottom: 80px; }
   h1 { font-size: 24px; margin-top: 0; }
   h2 { font-size: 19px; margin-top: 36px; padding-top: 8px; border-top: 1px solid var(--border); scroll-margin-top: 12px; }

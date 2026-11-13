@@ -4,12 +4,13 @@
   import FileTree from './components/FileTree.svelte';
   import RunPanel from './components/RunPanel.svelte';
   import Docs from './components/Docs.svelte';
+  import QuickRun from './components/QuickRun.svelte';
   import { EXAMPLES, exampleById } from './examples/index.js';
   import {
     PLAN_FORMATS, loadFromStorage, saveToStorage, projectToZip, projectFromZip,
     testdataToZip, downloadBlob, emptyProject,
   } from './lib/project.js';
-  import { Runner, langOf } from './lib/runner.js';
+  import { Runner, langOf, LANG_LABELS } from './lib/runner.js';
   import { generate, testExtras, fileOfRole } from './lib/pipeline.js';
 
   const restored = loadFromStorage();
@@ -22,14 +23,29 @@
   let genState = $state.raw(null);
   let extraState = $state.raw(null);
   let running = $state(null);
-  let pyStatus = $state('idle');
+  let envStatus = $state({ status: 'idle', detail: null });
+  let notice = $state(null);
   let saveError = $state(null);
   let dirty = $state(false);
   let currentJson = $state('');
   let genJson = $state(null);
 
   let stopped = false;
-  const runner = new Runner({ onStatus: (s) => (pyStatus = s) });
+  const runner = new Runner({ onStatus: (status, detail) => (envStatus = { status, detail }) });
+
+  // 執行環境的狀態訊息（Python / C++ 編譯器載入、C++ 編譯中）
+  let envMessage = $derived.by(() => {
+    const { status, detail } = envStatus;
+    if (status === 'loading-python') return '正在載入 Python 執行環境（首次約需數秒到數十秒）…';
+    if (status === 'loading-cpp') return `正在下載 C++ 編譯器（約 18 MB，只需下載一次）… ${detail ?? 0}%`;
+    if (status === 'compiling-cpp') return `正在編譯 C++${typeof detail === 'string' ? `：${detail}` : ''}…`;
+    return '';
+  });
+
+  // 手機上的 C++ 提醒（spec §14.4）
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+    || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+  let hasCpp = $derived(project.files.some((f) => langOf(f.name) === 'cpp'));
 
   let selected = $derived(project.files.find((f) => f.id === selectedId) ?? null);
   let editorLang = $derived(
@@ -170,8 +186,11 @@
 
   function onDownloadChecker() {
     if (!checker) return;
-    const ext = langOf(checker.name) === 'py' ? 'py' : 'js';
+    const ext = langOf(checker.name) ?? 'txt';
     downloadBlob(new Blob([checker.content], { type: 'text/plain' }), `checker.${ext}`);
+    if (ext === 'cpp' && /#\s*include\s*[<"]testlib\.h[>"]/.test(checker.content)) {
+      notice = '這個 checker 使用 testlib.h。網頁內建的是修改過的版本（為了在瀏覽器中編譯），在評測端請搭配原版 testlib.h 使用。';
+    }
   }
 
   async function onDownloadProject() {
@@ -196,7 +215,8 @@
   <header class="top">
     <a class="brand" href="#/">WebTaskMaker <small>出題工具</small></a>
     <nav class="nav">
-      <a href="#/" class:active={route !== '#/docs'}>工作區</a>
+      <a href="#/" class:active={route !== '#/docs' && route !== '#/run'}>工作區</a>
+      <a href="#/run" class:active={route === '#/run'}>簡單測試</a>
       <a href="#/docs" class:active={route === '#/docs'}>使用說明</a>
     </nav>
     <span class="spacer"></span>
@@ -212,9 +232,21 @@
   {#if saveError}
     <div class="banner">{saveError}</div>
   {/if}
+  {#if notice}
+    <div class="banner">{notice} <button class="link" onclick={() => (notice = null)}>關閉</button></div>
+  {/if}
+  {#if isMobile && hasCpp && route !== '#/docs'}
+    <div class="banner">C++ 是實驗性功能：編譯時需要數百 MB 記憶體，在手機上可能會失敗，建議使用桌面瀏覽器。</div>
+  {/if}
 
   {#if route === '#/docs'}
     <Docs />
+  {:else if route === '#/run'}
+    <QuickRun
+      {runner} {project} {genState} {envMessage}
+      busy={running !== null && running !== 'quickrun'}
+      onBusy={(b) => (running = b ? 'quickrun' : null)}
+    />
   {:else}
     <div class="settings">
       <label>
@@ -244,7 +276,7 @@
         {#if selected}
           <div class="editor-head">
             <span class="mono">{selected.role === 'plan' ? `參數表（${PLAN_FORMATS[project.planFormat].label}）` : selected.name}</span>
-            {#if editorLang}<span class="badge">{editorLang === 'py' ? 'Python' : 'JavaScript'}</span>{/if}
+            {#if editorLang}<span class="badge">{LANG_LABELS[editorLang]}</span>{/if}
           </div>
           <div class="editor-body">
             <CodeEditor
@@ -260,7 +292,7 @@
       </section>
       <section class="run-pane">
         <RunPanel
-          {genState} {extraState} {running} {pyStatus} {stale} {hasExtras}
+          {genState} {extraState} {running} {envMessage} {stale} {hasExtras}
           hasChecker={!!checker}
           {onGenerate} {onTestExtras} {onStop} {onDownloadTests} {onDownloadChecker}
         />
@@ -310,6 +342,7 @@
   .nav a.active { color: var(--text); background: var(--hover); }
   .spacer { flex: 1; }
   .menu { display: flex; gap: 6px; flex-wrap: wrap; }
+  .banner .link { border: none; background: none; color: var(--accent); padding: 0 4px; text-decoration: underline; }
   .banner { background: var(--warning-soft); color: var(--text); padding: 6px 16px; font-size: 13px; border-bottom: 1px solid var(--border); }
   .settings {
     display: flex;

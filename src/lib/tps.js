@@ -51,13 +51,15 @@ export function parseTps(text) {
     } else {
       const args = [];
       let seed;
+      let seedArg;
       for (const t of tokens.slice(1)) {
         const m = /^seed=(.+)$/.exec(t);
-        if (m) seed = parseSeed(m[1]);
+        if (m) { seed = parseSeed(m[1]); seedArg = m[1]; }
         else args.push(t);
       }
       if (seed === undefined) seed = hashSeed([head, ...args].join(' '));
-      tests.push({ index, kind: 'gen', gen: head, args, seed, line: lineNo, text: line, subtasks: [] });
+      // seedArg：明確指定的 seed= 原始值（C++ 生成器會以 seed=<值> 附加為最後一個參數，spec §14.3）
+      tests.push({ index, kind: 'gen', gen: head, args, seed, seedArg, line: lineNo, text: line, subtasks: [] });
     }
     if (current) current.own.push(index);
   });

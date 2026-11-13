@@ -3,7 +3,7 @@
   import { summarizeBySubtask } from '../lib/pipeline.js';
 
   let {
-    genState, extraState, running, pyStatus, stale, hasChecker, hasExtras,
+    genState, extraState, running, envMessage, stale, hasChecker, hasExtras,
     onGenerate, onTestExtras, onStop, onDownloadTests, onDownloadChecker,
   } = $props();
 
@@ -44,15 +44,15 @@
   <div class="toolbar">
     <button class="primary" onclick={onGenerate} disabled={!!running}>▶ 產生測資</button>
     <button onclick={onTestExtras} disabled={!!running || !genState?.ok || !hasExtras} title={!hasExtras ? '專案中沒有額外解答' : !genState?.ok ? '需先成功產生測資' : ''}>測試額外解答</button>
-    {#if running}<button class="danger" onclick={onStop}>■ 停止</button>{/if}
+    {#if running && running !== 'quickrun'}<button class="danger" onclick={onStop}>■ 停止</button>{/if}
     <span class="spacer"></span>
     <button onclick={onDownloadTests} disabled={!canDownload} title={canDownload ? '' : '所有測資都成功產生後才能下載'}>⤓ 下載測資 zip</button>
     {#if hasChecker}<button onclick={onDownloadChecker}>⤓ 下載 checker</button>{/if}
   </div>
 
   <div class="status" role="status">
-    {#if pyStatus === 'loading-python'}
-      <span class="note">正在載入 Python 執行環境（首次約需數秒到數十秒）…</span>
+    {#if envMessage}
+      <span class="note">{envMessage}</span>
     {/if}
     {#if genState}
       {#if genState.error}

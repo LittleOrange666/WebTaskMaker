@@ -7,6 +7,7 @@
   import { indentUnit } from '@codemirror/language';
   import { python } from '@codemirror/lang-python';
   import { javascript } from '@codemirror/lang-javascript';
+  import { cpp } from '@codemirror/lang-cpp';
   import { oneDark } from '@codemirror/theme-one-dark';
 
   /** docKey 改變時重建編輯器內容（切換檔案） */
@@ -21,6 +22,7 @@
   function langExt(l) {
     if (l === 'py') return python();
     if (l === 'js') return javascript();
+    if (l === 'cpp') return cpp();
     return [];
   }
 
