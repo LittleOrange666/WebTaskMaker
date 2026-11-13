@@ -333,12 +333,14 @@
   .editor-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
   .badge { font-size: 11px; padding: 1px 6px; border-radius: 10px; background: var(--hover); color: var(--muted); }
   .editor-body { flex: 1; min-height: 0; }
-  .run-pane { min-height: 0; }
+  .run-pane { min-height: 0; min-width: 0; }
+  .side, .editor-pane { min-width: 0; }
   .placeholder { color: var(--muted); padding: 24px; }
   .mono { font-family: var(--mono); }
   @media (max-width: 1000px) {
     .app { height: auto; min-height: 100vh; }
-    .work { grid-template-columns: 1fr; }
+    /* minmax(0, 1fr) 防止長程式行或寬表格把欄位撐得比螢幕還寬 */
+    .work { grid-template-columns: minmax(0, 1fr); }
     .side { border-right: none; border-bottom: 1px solid var(--border); max-height: 260px; }
     .editor-pane { height: 60vh; border-right: none; border-bottom: 1px solid var(--border); }
   }

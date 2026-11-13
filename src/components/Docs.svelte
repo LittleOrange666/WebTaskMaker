@@ -273,7 +273,8 @@ test("gen_random", 200000, 1, 10**9, seed=1)`}</pre>
   dt { font-weight: 600; margin-top: 8px; }
   dd { margin-left: 16px; }
   @media (max-width: 800px) {
-    .docs { grid-template-columns: 1fr; }
+    .docs { grid-template-columns: minmax(0, 1fr); }
+    .docs table { display: block; overflow-x: auto; }
     .toc { position: static; flex-direction: row; flex-wrap: wrap; }
     .api td:first-child { white-space: normal; }
   }
